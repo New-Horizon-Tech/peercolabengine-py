@@ -8,6 +8,7 @@ from peercolab_engine import (
     OutboundSessionBuilder, OutboundClientFactory, OutOfContextOperation,
     OutOfContextOperationPathParameter, TransportOperationSettings, TransportOperation,
     DefaultTransportSerializer, Characters,
+    ProcessChatInstruction,
 )
 
 json_serializer = DefaultTransportSerializer()
@@ -58,9 +59,6 @@ class SyncTasks(RequestOperation):
         )
 
 
-class ProcessChat(RequestOperation):
-    def __init__(self):
-        super().__init__("PeerColab.Instructions.ProcessChatInstruction", "PROCESS")
 
 
 def build_client_server_pair(configure_server, server_pattern_prefix="TestApp."):
@@ -89,7 +87,7 @@ class TestClientServerSerialization:
     update_product = UpdateProduct()
     get_product_details = GetProductDetails()
     sync_tasks = SyncTasks()
-    process_chat = ProcessChat()
+    process_chat = ProcessChatInstruction()
 
     @pytest.mark.asyncio
     async def test_simple_request_serializes_correctly(self):

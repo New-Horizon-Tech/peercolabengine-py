@@ -75,6 +75,12 @@ from .engine import (
     OutboundSessionBuilder,
     OutboundClientFactory,
     Transport,
+    # Chat Instructions (built-in AI/LLM integration)
+    ChatInstruction,
+    ProcessChatInstructionInput,
+    ProcessChatInstructionOutput,
+    ProcessChatInstruction,
+    PeerColabAI,
 )
 
 __all__ = [
@@ -135,4 +141,10 @@ __all__ = [
     "OutboundSessionBuilder",
     "OutboundClientFactory",
     "Transport",
+    # Chat Instructions (built-in AI/LLM integration)
+    "ChatInstruction",
+    "ProcessChatInstructionInput",
+    "ProcessChatInstructionOutput",
+    "ProcessChatInstruction",
+    "PeerColabAI",
 ]

@@ -11,6 +11,7 @@ build/
 .tox/
 .venv/
 venv/
+uv.lock
 env/
 *.so
 .coverage

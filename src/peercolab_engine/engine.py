@@ -2523,3 +2523,76 @@ class Transport:
     @staticmethod
     def session(identifier: str) -> TransportSessionBuilder:
         return TransportSessionBuilder(identifier)
+
+
+# ---------------------------------------------------------------------------
+# Chat Instructions (built-in AI/LLM integration)
+# ---------------------------------------------------------------------------
+
+
+class ChatInstruction:
+    __slots__ = ("type", "role", "content")
+
+    def __init__(self, type: str, role: str, content: str) -> None:
+        self.type = type
+        self.role = role
+        self.content = content
+
+
+class ProcessChatInstructionInput:
+    __slots__ = ("usage_instructions", "current_state_snapshot", "items")
+
+    def __init__(
+        self,
+        usage_instructions: str,
+        current_state_snapshot: str,
+        items: List[Any],
+    ) -> None:
+        self.usage_instructions = usage_instructions
+        self.current_state_snapshot = current_state_snapshot
+        self.items = items
+
+    # camelCase aliases
+    @property
+    def usageInstructions(self) -> str:
+        return self.usage_instructions
+
+    @property
+    def currentStateSnapshot(self) -> str:
+        return self.current_state_snapshot
+
+
+class ProcessChatInstructionOutput:
+    __slots__ = ("message", "operations")
+
+    def __init__(
+        self,
+        message: Optional[str] = None,
+        operations: Optional[List[Any]] = None,
+    ) -> None:
+        self.message = message
+        self.operations = operations or []
+
+
+class ProcessChatInstruction(RequestOperation):
+    def __init__(self) -> None:
+        super().__init__(
+            "PeerColab.Instructions.ProcessChatInstruction",
+            "PROCESS",
+        )
+
+
+class PeerColabAI:
+    @staticmethod
+    def process_chat_instructions(
+        input: Any,
+    ) -> RequestOperationRequest:
+        operation = ProcessChatInstruction()
+        return RequestOperationRequest(
+            "PeerColab.Instructions",
+            operation,
+            input,
+        )
+
+    # camelCase alias
+    processChatInstructions = process_chat_instructions
