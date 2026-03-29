@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "peercolab-engine"
-version = "0.1.1"
+version = "0.1.2"
 description = "Transport abstraction library for operation dispatching with interceptors"
 readme = "README.md"
 license = {file = "LICENSE"}
