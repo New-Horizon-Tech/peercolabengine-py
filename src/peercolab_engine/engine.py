@@ -35,6 +35,7 @@ with what type of data processing it is doing
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 import copy
@@ -159,6 +160,54 @@ class OutOfContextOperation:
     @property
     def pathParameters(self) -> Optional[List[OutOfContextOperationPathParameter]]:
         return self.path_parameters
+
+
+class OutOfContextEvent:
+    __slots__ = (
+        "usage_id", "event_id", "event_type", "request_json",
+        "path_parameters", "correlation_id",
+    )
+
+    def __init__(
+        self,
+        usage_id: str,
+        event_id: str,
+        event_type: str,
+        request_json: Any,
+        path_parameters: Optional[List[OutOfContextOperationPathParameter]] = None,
+        correlation_id: Optional[str] = None,
+    ) -> None:
+        self.usage_id = usage_id
+        self.event_id = event_id
+        self.event_type = event_type
+        self.request_json = request_json
+        self.path_parameters = path_parameters
+        self.correlation_id = correlation_id
+
+    # camelCase aliases
+    @property
+    def usageId(self) -> str:
+        return self.usage_id
+
+    @property
+    def eventId(self) -> str:
+        return self.event_id
+
+    @property
+    def eventType(self) -> str:
+        return self.event_type
+
+    @property
+    def requestJson(self) -> Any:
+        return self.request_json
+
+    @property
+    def pathParameters(self) -> Optional[List[OutOfContextOperationPathParameter]]:
+        return self.path_parameters
+
+    @property
+    def correlationId(self) -> Optional[str]:
+        return self.correlation_id
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +444,8 @@ class _AttributeEncoder(json.JSONEncoder):
         if isinstance(obj, TransportErrorDetails):
             return obj.to_dict()
         if isinstance(obj, TransportRequest):
+            return obj._to_dict()
+        if isinstance(obj, TransportEvent):
             return obj._to_dict()
         if isinstance(obj, Result):
             return obj._to_dict()
@@ -1494,6 +1545,16 @@ class MessageOperationHandler(OperationHandler[T, R]):
         self.handler = handler
 
 
+class EventOperationHandler(OperationHandler[T, R]):
+    def __init__(
+        self,
+        operation: "DispatchOperation",
+        handler: Callable[[Any, TransportContext], Awaitable[Result]],
+    ) -> None:
+        super().__init__(operation)
+        self.handler = handler
+
+
 class OperationRequest(Generic[T, R]):
     def __init__(
         self,
@@ -1529,6 +1590,10 @@ class MessageOperationRequest(OperationRequest[T, R]):
     pass
 
 
+class EventDispatchRequest(OperationRequest[T, R]):
+    pass
+
+
 class RequestOperation(TransportOperation[T, R]):
     def __init__(
         self,
@@ -1559,6 +1624,22 @@ class MessageOperation(TransportOperation[T, R]):
         self, interceptor: Callable[[Any, TransportContext], Awaitable[Result]]
     ) -> MessageOperationHandler:
         return MessageOperationHandler(self, interceptor)
+
+
+class DispatchOperation(TransportOperation[T, R]):
+    def __init__(
+        self,
+        id: str,
+        event_type: str,
+        path_parameters: Optional[List[str]] = None,
+        settings: Optional[TransportOperationSettings] = None,
+    ) -> None:
+        super().__init__("event", id, event_type, path_parameters, settings)
+
+    def handle(
+        self, interceptor: Callable[[Any, TransportContext], Awaitable[Result]]
+    ) -> EventOperationHandler:
+        return EventOperationHandler(self, interceptor)
 
 
 # ---------------------------------------------------------------------------
@@ -1601,6 +1682,7 @@ class CallInformation:
         attributes: List[Attribute],
         path_params: List[Attribute],
         transaction_id: UUID,
+        correlation_id: Optional[UUID] = None,
     ) -> None:
         self.locale = locale
         self.data_tenant = data_tenant
@@ -1608,6 +1690,7 @@ class CallInformation:
         self.attributes = attributes
         self.path_params = path_params
         self.transaction_id = transaction_id
+        self.correlation_id = correlation_id
 
     # camelCase aliases
     @property
@@ -1634,6 +1717,14 @@ class CallInformation:
     def transactionId(self, v: UUID) -> None:
         self.transaction_id = v
 
+    @property
+    def correlationId(self) -> Optional[UUID]:
+        return self.correlation_id
+
+    @correlationId.setter
+    def correlationId(self, v: Optional[UUID]) -> None:
+        self.correlation_id = v
+
     @staticmethod
     def new(locale: str, data_tenant: Optional[str] = None, transaction_id: Optional[UUID] = None) -> CallInformation:
         return CallInformation(
@@ -1653,6 +1744,7 @@ class CallInformation:
             list(self.attributes),
             list(self.path_params),
             self.transaction_id,
+            self.correlation_id,
         )
 
 
@@ -1712,6 +1804,7 @@ class TransportContext:
                 gateway_request.attributes,
                 gateway_request.path_params,
                 gateway_request.transaction_id,
+                gateway_request.correlation_id,
             ),
             gateway_request.serializer,
         )
@@ -1731,6 +1824,37 @@ class TransportContext:
 
     serializeRequest = serialize_request
 
+    def serialize_event(self, input: Any) -> str:
+        return TransportEvent.from_context(input, self).serialize()
+
+    serializeEvent = serialize_event
+
+    @staticmethod
+    def from_event(transport_event: TransportEvent) -> TransportContext:
+        if not transport_event.serializer:
+            raise RuntimeError("Serializer required to convert from transport event")
+        return TransportContext(
+            OperationInformation(
+                transport_event.event_id,
+                transport_event.event_type,
+                "event",
+                transport_event.calling_client,
+                transport_event.usage_id,
+            ),
+            CallInformation(
+                transport_event.locale,
+                transport_event.data_tenant,
+                transport_event.characters,
+                transport_event.attributes,
+                transport_event.path_params,
+                transport_event.transaction_id,
+                transport_event.correlation_id,
+            ),
+            transport_event.serializer,
+        )
+
+    fromEvent = from_event
+
 
 class TransportRequest(Generic[T]):
     def __init__(
@@ -1748,6 +1872,7 @@ class TransportRequest(Generic[T]):
         path_params: List[Attribute],
         request_json: Any,
         raw: Optional[str] = None,
+        correlation_id: Optional[UUID] = None,
     ) -> None:
         self.operation_id = operation_id
         self.operation_verb = operation_verb
@@ -1762,6 +1887,7 @@ class TransportRequest(Generic[T]):
         self.path_params = path_params
         self.request_json = request_json
         self.raw = raw
+        self.correlation_id = correlation_id
         self.serializer: Optional[Any] = None
 
     # camelCase aliases
@@ -1801,6 +1927,10 @@ class TransportRequest(Generic[T]):
     def pathParams(self) -> List[Attribute]:
         return self.path_params
 
+    @property
+    def correlationId(self) -> Optional[UUID]:
+        return self.correlation_id
+
     @staticmethod
     def from_serialized(serializer: Any, serialized: str) -> TransportRequest:
         tr = TransportRequest(
@@ -1828,6 +1958,7 @@ class TransportRequest(Generic[T]):
             ctx.call.attributes,
             ctx.call.path_params,
             input,
+            correlation_id=ctx.call.correlation_id,
         )
         tr.serializer = ctx.serializer
         return tr
@@ -1869,7 +2000,7 @@ class TransportRequest(Generic[T]):
                 chars_d["subject"] = chars.subject
             chars = chars_d
 
-        return {
+        d: Dict[str, Any] = {
             "operationId": self.operation_id,
             "operationVerb": self.operation_verb,
             "operationType": self.operation_type,
@@ -1883,6 +2014,9 @@ class TransportRequest(Generic[T]):
             "pathParams": self.path_params,
             "requestJson": self.request_json,
         }
+        if self.correlation_id is not None:
+            d["correlationId"] = self.correlation_id
+        return d
 
     def _deserialize(self, serialized: str) -> TransportRequest:
         if not self.serializer:
@@ -1915,6 +2049,7 @@ class TransportRequest(Generic[T]):
             path_params,
             d.get("requestJson"),
             serialized,
+            correlation_id=d.get("correlationId"),
         )
         new_tr.serializer = self.serializer
         return new_tr
@@ -1928,6 +2063,194 @@ def _parse_identifier(data: Any) -> Optional[Identifier]:
     return None
 
 
+class TransportEvent(Generic[T]):
+    def __init__(
+        self,
+        event_id: str,
+        event_type: str,
+        calling_client: str,
+        usage_id: str,
+        transaction_id: UUID,
+        data_tenant: str,
+        locale: str,
+        characters: Any,
+        attributes: List[Attribute],
+        path_params: List[Attribute],
+        request_json: Any,
+        raw: Optional[str] = None,
+        correlation_id: Optional[UUID] = None,
+    ) -> None:
+        self.event_id = event_id
+        self.event_type = event_type
+        self.calling_client = calling_client
+        self.usage_id = usage_id
+        self.transaction_id = transaction_id
+        self.data_tenant = data_tenant
+        self.locale = locale
+        self.characters = characters
+        self.attributes = attributes
+        self.path_params = path_params
+        self.request_json = request_json
+        self.raw = raw
+        self.correlation_id = correlation_id
+        self.serializer: Optional[Any] = None
+
+    # camelCase aliases
+    @property
+    def eventId(self) -> str:
+        return self.event_id
+
+    @property
+    def eventType(self) -> str:
+        return self.event_type
+
+    @property
+    def callingClient(self) -> str:
+        return self.calling_client
+
+    @property
+    def usageId(self) -> str:
+        return self.usage_id
+
+    @property
+    def transactionId(self) -> UUID:
+        return self.transaction_id
+
+    @property
+    def dataTenant(self) -> str:
+        return self.data_tenant
+
+    @property
+    def requestJson(self) -> Any:
+        return self.request_json
+
+    @property
+    def pathParams(self) -> List[Attribute]:
+        return self.path_params
+
+    @property
+    def correlationId(self) -> Optional[UUID]:
+        return self.correlation_id
+
+    @staticmethod
+    def from_serialized(serializer: Any, serialized: str) -> TransportEvent:
+        te = TransportEvent(
+            "", "", "", "", "", "", "",
+            Characters(), [], [], {},
+            None,
+        )
+        te.serializer = serializer
+        return te._deserialize(serialized)
+
+    fromSerialized = from_serialized
+
+    @staticmethod
+    def from_context(input: Any, ctx: TransportContext) -> TransportEvent:
+        te = TransportEvent(
+            ctx.operation.id,
+            ctx.operation.verb,
+            ctx.operation.calling_client,
+            ctx.operation.usage_id,
+            ctx.call.transaction_id if ctx.call.transaction_id else generate_uuid(),
+            ctx.call.data_tenant or "",
+            ctx.call.locale,
+            ctx.call.characters,
+            ctx.call.attributes,
+            ctx.call.path_params,
+            input,
+            correlation_id=ctx.call.correlation_id,
+        )
+        te.serializer = ctx.serializer
+        return te
+
+    # Alias: TS uses TransportEvent.from()
+    @staticmethod
+    def from_(input: Any, ctx: TransportContext) -> TransportEvent:
+        return TransportEvent.from_context(input, ctx)
+
+    def assign_serializer(self, serializer: Any) -> TransportEvent:
+        self.serializer = serializer
+        return self
+
+    assignSerializer = assign_serializer
+
+    def serialize(self) -> str:
+        if not self.serializer:
+            raise RuntimeError("No serializer assigned to TransportEvent")
+        return self.serializer.serialize(self)
+
+    def _to_dict(self) -> Dict[str, Any]:
+        chars: Any = self.characters
+        if isinstance(chars, Characters):
+            chars_d: Dict[str, Any] = {}
+            if chars.performer is not None:
+                chars_d["performer"] = chars.performer
+            if chars.responsible is not None:
+                chars_d["responsible"] = chars.responsible
+            if chars.subject is not None:
+                chars_d["subject"] = chars.subject
+            chars = chars_d
+        elif isinstance(chars, CharacterMetaValues):
+            chars_d = {}
+            if chars.performer is not None:
+                chars_d["performer"] = chars.performer
+            if chars.responsible is not None:
+                chars_d["responsible"] = chars.responsible
+            if chars.subject is not None:
+                chars_d["subject"] = chars.subject
+            chars = chars_d
+
+        d: Dict[str, Any] = {
+            "eventId": self.event_id,
+            "eventType": self.event_type,
+            "callingClient": self.calling_client,
+            "usageId": self.usage_id,
+            "transactionId": self.transaction_id,
+            "dataTenant": self.data_tenant,
+            "locale": self.locale,
+            "characters": chars,
+            "attributes": self.attributes,
+            "pathParams": self.path_params,
+            "requestJson": self.request_json,
+        }
+        if self.correlation_id is not None:
+            d["correlationId"] = self.correlation_id
+        return d
+
+    def _deserialize(self, serialized: str) -> TransportEvent:
+        if not self.serializer:
+            raise RuntimeError("No serializer assigned to TransportEvent")
+        d = self.serializer.deserialize(serialized)
+
+        chars_data = d.get("characters", {})
+        characters = Characters(
+            performer=_parse_identifier(chars_data.get("performer")) if chars_data.get("performer") else None,
+            responsible=_parse_identifier(chars_data.get("responsible")) if chars_data.get("responsible") else None,
+            subject=_parse_identifier(chars_data.get("subject")) if chars_data.get("subject") else None,
+        )
+
+        attrs = [Attribute(a["name"], a["value"]) for a in d.get("attributes", [])]
+        path_params = [Attribute(a["name"], a["value"]) for a in d.get("pathParams", [])]
+
+        new_te = TransportEvent(
+            d.get("eventId", ""),
+            d.get("eventType", ""),
+            d.get("callingClient", ""),
+            d.get("usageId", ""),
+            d.get("transactionId", ""),
+            d.get("dataTenant", ""),
+            d.get("locale", ""),
+            characters,
+            attrs,
+            path_params,
+            d.get("requestJson"),
+            serialized,
+            correlation_id=d.get("correlationId"),
+        )
+        new_te.serializer = self.serializer
+        return new_te
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
@@ -1935,6 +2258,7 @@ def _parse_identifier(data: Any) -> Optional[Identifier]:
 # Type aliases for interceptors
 RequestInterceptor = Callable[[Any, TransportContext], Awaitable[Result]]
 MessageInterceptor = Callable[[Any, TransportContext], Awaitable[Result]]
+EventInterceptor = Callable[[Any, TransportContext], Awaitable[Result]]
 RequestInspector = Callable[[Any, TransportContext], Awaitable[Optional[Result]]]
 ResponseInspector = Callable[[Result, Any, TransportContext], Awaitable[Result]]
 
@@ -1956,6 +2280,10 @@ class TransportDispatcher:
         self._pattern_handlers: Dict[str, RequestInterceptor] = {}
         self._sort_patterns = False
         self._sorted_patterns: List[str] = []
+        self._event_handlers: Dict[str, List[EventInterceptor]] = {}
+        self._event_pattern_handlers: Dict[str, List[EventInterceptor]] = {}
+        self._sort_event_patterns = False
+        self._sorted_event_patterns: List[str] = []
 
     # camelCase aliases
     @property
@@ -2009,6 +2337,25 @@ class TransportDispatcher:
 
     addPatternHandler = add_pattern_handler
 
+    def add_event_handler(self, event_id: str, handler: EventInterceptor) -> None:
+        existing = self._event_handlers.get(event_id)
+        if existing is not None:
+            existing.append(handler)
+        else:
+            self._event_handlers[event_id] = [handler]
+
+    addEventHandler = add_event_handler
+
+    def add_event_pattern_handler(self, pattern: str, handler: EventInterceptor) -> None:
+        existing = self._event_pattern_handlers.get(pattern)
+        if existing is not None:
+            existing.append(handler)
+        else:
+            self._event_pattern_handlers[pattern] = [handler]
+            self._sort_event_patterns = True
+
+    addEventPatternHandler = add_event_pattern_handler
+
     async def route_from_gateway_request(self, input: Any, ctx: TransportContext) -> Result:
         if ctx.operation.type == "request":
             return await self.handle_as_request(input, ctx)
@@ -2044,6 +2391,103 @@ class TransportDispatcher:
         return await self._run_pattern_handler(input, cache_result.value)
 
     handleAsRequest = handle_as_request
+
+    async def handle_as_event(self, input: Any, ctx: TransportContext, match_sessions: bool = False) -> Result:
+        inspection_result = await self._inspect_request(input, ctx)
+        cache_result = await self._handle_cache(ctx, match_sessions)
+        if not cache_result.success:
+            return cache_result.as_generic()
+        if inspection_result:
+            return inspection_result
+
+        event_id = cache_result.value.operation.id
+        specific = self._event_handlers.get(event_id, [])
+        matching_pattern = self._find_matching_event_pattern(event_id)
+        pattern_handlers = (
+            self._event_pattern_handlers.get(matching_pattern, []) if matching_pattern else []
+        )
+
+        all_handlers: List[Dict[str, Any]] = []
+        for idx, h in enumerate(specific):
+            sub_id = f"{event_id}#{idx}" if len(specific) > 1 else event_id
+            all_handlers.append({"id": sub_id, "handler": h})
+        for idx, h in enumerate(pattern_handlers):
+            sub_id = (
+                f"{matching_pattern}#{idx}" if len(pattern_handlers) > 1 else matching_pattern
+            )
+            all_handlers.append({"id": sub_id, "handler": h})
+
+        if not all_handlers:
+            return await self._inspect_response(
+                self._handler_not_found(event_id).as_generic(), input, cache_result.value
+            )
+
+        async def run_one(sub_id: str, handler: EventInterceptor) -> Dict[str, Any]:
+            try:
+                r = await handler(input, cache_result.value)
+                return {"id": sub_id, "result": r}
+            except Exception as e:
+                return {"id": sub_id, "result": self._generic_error(e)}
+
+        outcomes = await asyncio.gather(
+            *[run_one(entry["id"], entry["handler"]) for entry in all_handlers]
+        )
+
+        failed: List[TransportError] = []
+        for outcome in outcomes:
+            r: Result = outcome["result"]
+            if not r.success:
+                err = r.error if r.error is not None else TransportError(
+                    "TransportSession.DispatchHandlerFailed",
+                    TransportErrorDetails(
+                        technical_error="Handler returned failed result without error",
+                    ),
+                )
+                cloned_details = TransportErrorDetails(
+                    technical_error=err.details.technical_error if err.details else None,
+                    user_error=err.details.user_error if err.details else None,
+                    session_identifier=err.details.session_identifier if err.details else None,
+                    calling_client=err.details.calling_client if err.details else None,
+                    calling_usage=err.details.calling_usage if err.details else None,
+                    called_operation=outcome["id"],
+                    transaction_id=err.details.transaction_id if err.details else None,
+                )
+                failed.append(TransportError(
+                    err.code,
+                    cloned_details,
+                    list(err.related) if err.related else [],
+                    err.parent,
+                ))
+
+        if not failed:
+            aggregated = Result.ok().as_generic()
+        else:
+            aggregated = Result.failed(
+                500,
+                TransportError(
+                    "TransportSession.DispatchPartialFailure",
+                    TransportErrorDetails(
+                        technical_error=f"{len(failed)} of {len(all_handlers)} subscriber(s) failed",
+                    ),
+                    failed,
+                    None,
+                ),
+            )
+
+        return await self._inspect_response(aggregated, input, cache_result.value)
+
+    handleAsEvent = handle_as_event
+
+    def _find_matching_event_pattern(self, event_id: str) -> Optional[str]:
+        if self._sort_event_patterns:
+            keys = list(self._event_pattern_handlers.keys())
+            keys.sort(key=lambda a: -len(a.lower()))
+            self._sorted_event_patterns = keys
+            self._sort_event_patterns = False
+        for key in self._sorted_event_patterns:
+            if event_id.startswith(key):
+                return key
+        return None
 
     def _validate_unique_handler(self, id: str) -> None:
         if id in self._request_handlers or id in self._message_handlers or id in self._pattern_handlers:
@@ -2221,6 +2665,50 @@ class TransportSession:
 
     acceptIncomingRequest = accept_incoming_request
 
+    async def accept_incoming_event(self, json_str: str, custom_attributes: Optional[List[Attribute]] = None) -> Result:
+        if custom_attributes is None:
+            custom_attributes = []
+        te = TransportEvent.from_serialized(self._config.serializer, json_str)
+        ctx = TransportContext.from_event(te)
+        for attribute in custom_attributes:
+            if ctx.get_attribute(attribute.name) is not None:
+                continue
+            ctx.call.attributes.append(attribute)
+        result = await self._config.interceptors.handle_as_event(te.request_json, ctx)
+        return result.assign_serializer(self._config.serializer)
+
+    acceptIncomingEvent = accept_incoming_event
+
+    async def accept_event(self, event: OutOfContextEvent, custom_attributes: Optional[List[Attribute]] = None) -> Result:
+        if custom_attributes is None:
+            custom_attributes = []
+        call_info = CallInformation.new(self._config.locale)
+        call_info.correlation_id = event.correlation_id
+        ctx = TransportContext(
+            OperationInformation(
+                event.event_id,
+                event.event_type,
+                "event",
+                "",
+                event.usage_id,
+            ),
+            call_info,
+            self._config.serializer,
+        )
+        if event.path_parameters:
+            for param in event.path_parameters:
+                if ctx.has_path_parameter(param.name):
+                    continue
+                ctx.call.path_params.append(Attribute(param.name, param.value))
+        for attribute in custom_attributes:
+            if ctx.get_attribute(attribute.name) is not None:
+                continue
+            ctx.call.attributes.append(attribute)
+        result = await self._config.interceptors.handle_as_event(event.request_json, ctx)
+        return result.assign_serializer(self._config.serializer)
+
+    acceptEvent = accept_event
+
     def create_client(self, client_identifier: str, data_tenant: Optional[str] = None) -> TransportClient:
         info = CallInformation.new(self._config.locale, data_tenant)
         return TransportClient(client_identifier, self._config, info, self._match_sessions)
@@ -2270,6 +2758,13 @@ class TransportClient:
         return TransportClient(self._client_identifier, self._config, new_call_info, self._match_sessions)
 
     withDataTenant = with_data_tenant
+
+    def with_correlation_id(self, correlation_id: UUID) -> TransportClient:
+        new_call_info = self._call_info.clone()
+        new_call_info.correlation_id = correlation_id
+        return TransportClient(self._client_identifier, self._config, new_call_info, self._match_sessions)
+
+    withCorrelationId = with_correlation_id
 
     def with_characters(self, characters: Any) -> TransportClient:
         new_call_info = self._call_info.clone()
@@ -2332,6 +2827,30 @@ class TransportClient:
             return await self._config.interceptors.handle_as_request(call.input, ctx, self._match_sessions)
         else:
             return await self._config.interceptors.handle_as_message(call.input, ctx, self._match_sessions)
+
+    async def dispatch(self, call: EventDispatchRequest, timeout_ms: int = 30_000) -> Result:
+        request_call_info = self._call_info.clone()
+        request_call_info.transaction_id = generate_uuid()
+        ctx = TransportContext(
+            call.as_operation_information(self._client_identifier),
+            request_call_info,
+            self._config.serializer,
+        )
+        try:
+            return await asyncio.wait_for(
+                self._config.interceptors.handle_as_event(call.input, ctx, self._match_sessions),
+                timeout=timeout_ms / 1000,
+            )
+        except asyncio.TimeoutError:
+            return Result.failed(
+                504,
+                TransportError(
+                    "TransportSession.DispatchTimeout",
+                    TransportErrorDetails(
+                        technical_error=f"Dispatch exceeded {timeout_ms}ms",
+                    ),
+                ),
+            )
 
     async def accept_operation(self, operation: OutOfContextOperation, custom_attributes: Optional[List[Attribute]] = None) -> Result:
         if custom_attributes is None:
@@ -2426,6 +2945,16 @@ class TransportSessionBuilder:
 
     interceptPattern = intercept_pattern
 
+    def subscribe(self, handler: EventOperationHandler) -> TransportSessionBuilder:
+        self._config.interceptors.add_event_handler(handler.operation.id, handler.handler)
+        return self
+
+    def subscribe_pattern(self, pattern: str, handler: EventInterceptor) -> TransportSessionBuilder:
+        self._config.interceptors.add_event_pattern_handler(pattern, handler)
+        return self
+
+    subscribePattern = subscribe_pattern
+
     def inspect_request(self, inspector: RequestInspector) -> TransportSessionBuilder:
         self._config.interceptors.requests_inspector = inspector
         return self
@@ -2482,6 +3011,16 @@ class OutboundSessionBuilder:
         return self
 
     interceptPattern = intercept_pattern
+
+    def subscribe(self, handler: EventOperationHandler) -> OutboundSessionBuilder:
+        self._config.interceptors.add_event_handler(handler.operation.id, handler.handler)
+        return self
+
+    def subscribe_pattern(self, pattern: str, handler: EventInterceptor) -> OutboundSessionBuilder:
+        self._config.interceptors.add_event_pattern_handler(pattern, handler)
+        return self
+
+    subscribePattern = subscribe_pattern
 
     def inspect_request(self, inspector: RequestInspector) -> OutboundSessionBuilder:
         self._config.interceptors.requests_inspector = inspector
